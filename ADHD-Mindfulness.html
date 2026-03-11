@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>正念石</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.3/p5.min.js"></script>
+  <style>
+    body { margin: 0; background: #000; overflow: hidden; font-family: "PingFang SC", "Microsoft YaHei", sans-serif; cursor: none; }
+    
+    /* 左侧数据面板 */
+    #data-panel {
+      position: fixed; top: 50px; left: 50px; text-align: left; z-index: 20; color: rgba(255, 255, 255, 0.8);
+    }
+    .hr-label { font-size: 11px; letter-spacing: 2px; color: rgba(255,255,255,0.3); margin-bottom: 5px; }
+    .hr-value { font-size: 22px; margin-bottom: 25px; color: #a855f7; font-weight: 300; }
+    
+    /* 核心引导 UI */
+    #ui-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      pointer-events: none; color: white; text-align: center; z-index: 10;
+    }
+    .main-text {
+      font-size: 26px; font-weight: 300; letter-spacing: 6px; line-height: 1.5;
+      color: rgba(255, 255, 255, 0.95); transition: opacity 2s ease-in-out;
+      max-width: 85%; text-shadow: 0 0 30px rgba(168, 85, 247, 0.6);
+    }
+    .sub-text { font-size: 11px; letter-spacing: 2px; margin-top: 8px; color: rgba(255, 255, 255, 0.3); text-transform: uppercase; }
+    
+    /* 进度条：仅在 State 1 可见 */
+    #progress-wrap { width: 180px; height: 1px; background: rgba(255,255,255,0.1); margin-top: 50px; display: none; }
+    #progress-bar { width: 0%; height: 100%; background: #a855f7; box-shadow: 0 0 15px #a855f7; transition: width 0.3s; }
+
+    /* 连接按钮（椭圆/药丸形状） */
+    #connect-btn {
+      position: fixed; top: 40px; right: 40px; padding: 10px 25px; border-radius: 50px;
+      background: rgba(168, 85, 247, 0.1); border: 1px solid rgba(168, 85, 247, 0.4);
+      color: white; font-size: 12px; letter-spacing: 2px; cursor: pointer; z-index: 100; transition: all 0.5s;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #connect-btn.connected { width: 40px; height: 40px; padding: 0; border-radius: 50%; background: transparent; border: none; }
+    #stone-icon { display: none; width: 30px; height: 30px; fill: none; stroke: rgba(168, 85, 247, 0.6); stroke-width: 1.5; }
+    #status-dot { display: none; width: 8px; height: 8px; background: #a855f7; border-radius: 50%; box-shadow: 0 0 15px #a855f7; position: absolute; }
+  </style>
+</head>
+<body>
+
+<div id="data-panel" style="display:none;">
+  <div class="hr-label">正念初始频率</div>
+  <div id="initial-hr" class="hr-value">--</div>
+  <div class="hr-label">当前实时频率</div>
+  <div id="current-hr" class="hr-value">--</div>
+</div>
+
+<button id="connect-btn">
+  <span id="btn-text">连接感官石</span>
+  <svg id="stone-icon" viewBox="0 0 100 100"><path d="M50,15 C75,15 90,35 90,55 C90,75 70,85 50,85 C30,85 10,75 10,55 C10,35 25,15 50,15 Z"/></svg>
+  <div id="status-dot"></div>
+</button>
+
+<div id="ui-overlay">
+  <div id="main-text" class="main-text">前方有一块安静的石头<br>请坐下，感受他的能量</div>
+  <div id="sub-text" class="sub-text">A quiet stone awaits. Sit, and hold its core</div>
+  <div id="progress-wrap"><div id="progress-bar"></div></div>
+</div>
+
+<script>
+/** Web Serial 内置驱动 */
+p5.prototype.createSerial = function() { const s = new WebSerial(); this._elements.push(s); return s; };
+class WebSerial {
+  constructor() { this.port = null; this.reader = null; this.serialData = []; }
+  async open(baud = 9600) { this.port = await navigator.serial.requestPort(); await this.port.open({ baudRate: baud }); this.readLoop(); }
+  async readLoop() { while (this.port.readable) { this.reader = this.port.readable.getReader(); try { while (true) { const { value, done } = await this.reader.read(); if (done) break; if (value) value.forEach(v => this.serialData.push(v)); } } finally { this.reader.releaseLock(); } } }
+  available() { return this.serialData.length; }
+  readStringUntil(char) { const idx = this.serialData.indexOf(char.charCodeAt(0)); if (idx !== -1) { const s = this.serialData.splice(0, idx + 1); return String.fromCharCode(...s); } return null; }
+  opened() { return this.port && this.port.readable; }
+}
+
+/** 核心交互程序 */
+let state = 0, timer = 0, filaments = []; const numFilaments = 480;
+let serial, rawVal = 512, smoothedSensor = 0, isSimulating = true; 
+let initialHR = 0, displayHR = 0, hrHistory = []; const maxHistory = 150;
+let valSum = 0, valSampleCount = 0;
+
+// State 4 分步引导文案 (含英文)
+const scanPhrases = [
+  { zh: "感受身体被座椅稳稳地托住", en: "Feel the steady support beneath you" },
+  { zh: "觉察掌心石头的微温<br>那是你的生命律动", en: "Notice the warmth of the stone—it beats with you" },
+  { zh: "觉察四肢沉稳的重量", en: "Feel the heavy, grounding weight of your limbs" },
+  { zh: "放下双肩<br>让堆积的紧张慢慢流走", en: "Drop your shoulders, let the tension melt away" },
+  { zh: "此时此地，你正被安全地接纳", en: "You are safely held by the here and now" },
+  { zh: "念头游走也没关系，轻轻带它回来", en: "It's okay to wander. Just gently return" },
+  { zh: "现在的你，只需感受最自然的呼吸", en: "Now, just feel the natural flow of your breath" },
+  { zh: "在这一刻，你已抵达当下", en: "In this moment, you have arrived" }
+];
+
+function setup() {
+  createCanvas(windowWidth, windowHeight);
+  colorMode(HSB, 360, 100, 100, 100);
+  for (let i = 0; i < numFilaments; i++) filaments.push(new Filament());
+
+  serial = createSerial();
+  const cBtn = document.getElementById('connect-btn');
+  cBtn.onclick = async () => {
+    try {
+      await serial.open(9600); isSimulating = false;
+      document.getElementById('btn-text').style.display='none';
+      document.getElementById('stone-icon').style.display='block';
+      document.getElementById('status-dot').style.display='block';
+      cBtn.classList.add('connected');
+    } catch(e) { console.log("Serial Cancelled"); }
+  };
+}
+
+function draw() {
+  background(0, 0, 0, 10); 
+  updateHeartData(); 
+  drawPulseStars();
+  
+  let t = millis(), elapsed = t - timer;
+  if (document.getElementById('status-dot')) { 
+    document.getElementById('status-dot').style.transform = `scale(${1 + smoothedSensor * 1.5})`; 
+  }
+
+  switch(state) {
+    case 0: // 封面：静止星云
+      drawEye(0); renderVisuals(0.5, 0.01, 20); 
+      updateUI("前方有一块安静的石头<br>请坐下，感受他的能量", "A quiet stone awaits. Sit, and hold its core");
+      break;
+
+    case 1: // 同步阶段
+      let p1 = min(elapsed / 8000, 1); toggleProgress(true, p1);
+      updateUI("别急<br>它正在试着读懂你的呼吸和心跳", "Let the stone find your rhythm");
+      renderVisuals(0.6 + p1*0.2, 0.03, 30);
+      if (p1 < 0.9) {
+        valSum += displayHR; valSampleCount++;
+        initialHR = floor(valSum / valSampleCount);
+        document.getElementById('initial-hr').innerText = initialHR;
+      }
+      if (p1 >= 1) { nextState(2); toggleProgress(false); }
+      break;
+
+    case 2: // 睁眼过程 (10s)
+      updateUI("内在旅程，此刻开启", "The journey begins");
+      let p2 = min(elapsed / 10000, 1); 
+      drawEye(p2); renderVisuals(1.0, 0.05, 45);
+      if (p2 >= 1) nextState(3); break;
+
+    case 3: // 深呼训练 (12s/次)
+      let ph3 = (elapsed % 12000) / 12000;
+      let w3 = sin(ph3 * TWO_PI - HALF_PI) * 0.5 + 0.5;
+      if (ph3 < 0.5) updateUI("深深地吸气...<br>感受气息充盈你的胸膛", "Inhale deeply");
+      else updateUI("缓缓地呼气...<br>让那些嘈杂随之沉落", "Exhale slowly");
+      renderVisuals(0.7 + w3 * 2.5 + smoothedSensor * 7, 0.1, 35 + w3 * 55);
+      if (elapsed > 36000) nextState(4); break;
+
+    case 4: // 身体扫描 (90s)
+      let scanDur = 90000;
+      let step = min(floor(map(elapsed, 0, scanDur, 0, scanPhrases.length)), scanPhrases.length-1);
+      updateUI(scanPhrases[step].zh, scanPhrases[step].en);
+      // 自然慢呼吸频率 5.5s
+      let w4 = sin((t % 5500) / 5500 * TWO_PI) * 0.5 + 0.5;
+      renderVisuals(1.0 + w4 * 0.8 + smoothedSensor * 3.5, 0.04, 38 + w4 * 25); 
+      if (elapsed > scanDur) nextState(5); break;
+
+    case 5: // 结算反馈与自动循环
+      let diff = initialHR - floor(displayHR);
+      let calmIndex = floor(map(diff, -5, 20, 12, 46, true));
+      updateUI(`正念完成<br>你的平静度提升了${calmIndex}%`, "You have arrived");
+      renderVisuals(1.0 - (min(elapsed, 12000)/12000), 0.01, 15);
+      // 15秒后重置回状态0
+      if (elapsed > 15000) resetSystem();
+      break;
+  }
+}
+
+function resetSystem() {
+  state = 0; timer = millis();
+  valSum = 0; valSampleCount = 0;
+  document.getElementById('data-panel').style.display = 'none';
+}
+
+function updateHeartData() {
+  if (isSimulating) {
+    let target = state >= 4 ? 68 : 86;
+    rawVal = lerp(rawVal, target + noise(frameCount*0.04)*10, 0.05);
+  } else if (serial.opened() && serial.available() > 0) {
+    let data = serial.readStringUntil('\n');
+    if (data) {
+      let v = float(data.trim());
+      if (!isNaN(v) && v > 100) {
+        rawVal = lerp(rawVal, v, 0.1);
+        if (state === 0 && abs(v - 512) > 40) { 
+           nextState(1); timer = millis();
+           document.getElementById('data-panel').style.display = 'block';
+        }
+      }
+    }
+  }
+  let stateDrift = map(state, 0, 4, 0, 10); 
+  displayHR = floor(map(rawVal, 400, 800, 85, 75, true) - stateDrift + noise(frameCount*0.01)*3);
+  document.getElementById('current-hr').innerText = displayHR;
+  smoothedSensor = lerp(smoothedSensor, map(rawVal, 400, 800, 0, 1, true), 0.15);
+  if (frameCount % 4 === 0) { hrHistory.push(rawVal); if (hrHistory.length > maxHistory) hrHistory.shift(); }
+}
+
+function renderVisuals(exp, turb, briBase) {
+  push(); translate(width/2, height/2);
+  for (let f of filaments) { f.update(exp, turb); f.show(briBase); }
+  pop();
+}
+
+class Filament {
+  constructor() {
+    this.angle = random(TWO_PI); this.radius = pow(random(0.05, 1), 1.5) * (width * 0.58);
+    this.pos = createVector(cos(this.angle)*this.radius, sin(this.angle)*this.radius);
+    this.prev = this.pos.copy(); this.vel = createVector(0,0); this.hue = random(250, 295);
+  }
+  update(exp, turb) {
+    this.prev = this.pos.copy();
+    let n = noise(this.pos.x*0.004, this.pos.y*0.004, frameCount*(state===4?0.0008:0.0018));
+    let flow = createVector(cos(n*TWO_PI*2.5), sin(n*TWO_PI*2.5)).mult(turb*3.0);
+    let target = createVector(cos(this.angle), sin(this.angle)).mult(this.radius * exp);
+    this.vel.add(flow).add(p5.Vector.sub(target, this.pos).mult(0.055)).add(createVector(-this.pos.y, this.pos.x).normalize().mult(0.04)).mult(state===4?0.92:0.94);
+    this.pos.add(this.vel);
+  }
+  show(bri) {
+    stroke(this.hue, 55, bri + smoothedSensor*30 + this.vel.mag()*12, map(this.pos.mag(),0,width*0.6,75,0));
+    strokeWeight(2.3); line(this.pos.x, this.pos.y, this.prev.x, this.prev.y);
+  }
+}
+
+function drawPulseStars() {
+  push(); for (let i = 0; i < hrHistory.length; i++) {
+    let x = map(i, 0, maxHistory, 50, width - 50);
+    let y = map(hrHistory[i], 300, 900, height - 60, height - 160);
+    noStroke(); fill(280, 20, 100, map(i,0,maxHistory,0,80)); circle(x, y, map(hrHistory[i],400,800,2,6));
+  } pop();
+}
+
+function updateUI(zh, en) { 
+  const m = document.getElementById('main-text'); const s = document.getElementById('sub-text');
+  if (m) m.innerHTML = zh; if (s) s.innerHTML = en;
+}
+function nextState(s) { state = s; timer = millis(); }
+function toggleProgress(show, val) {
+  let el = document.getElementById('progress-wrap'); let bar = document.getElementById('progress-bar');
+  if(el) el.style.display = show ? 'block' : 'none'; if(bar && show) bar.style.width = (val * 100) + "%";
+}
+function drawEye(o) {
+  if (state >= 3 || o <= 0) return;
+  push(); translate(width/2, height/2); noFill(); stroke(280, 40, 100, 30 * o); strokeWeight(2);
+  bezier(-150, 0, -75, -60 * o, 75, -60 * o, 150, 0); bezier(-150, 0, -75, 60 * o, 75, 60 * o, 150, 0); pop();
+}
+function mousePressed() { if (state === 0 && isSimulating) { nextState(1); document.getElementById('data-panel').style.display='block'; if(!fullscreen()) fullscreen(true); } }
+function windowResized() { resizeCanvas(windowWidth, windowHeight); }
+</script>
+</body>
+</html>
